@@ -1,0 +1,7 @@
+
+.env
+
+venv/
+influxdb_data/
+grafana_data/
+influxdb_config/
