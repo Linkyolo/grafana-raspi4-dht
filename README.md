@@ -1,6 +1,10 @@
 # grafana-raspi4-dht
 
 
+```bash
+mkdir -p influxdb_data influxdb_config grafana_data
+```
+
 ## Pip
 ```bash
 pip install --upgrade pip
@@ -21,3 +25,9 @@ INFLUX_ORG= xxx
 INFLUX_BUCKET= xxx
 INFLUX_URL= xxx
 GRAFANA_PASSWORD= xxx
+
+## per jupyter
+
+```bash
+pip install influxdb-client pandas matplotlib
+```
