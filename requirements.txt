@@ -1,0 +1,12 @@
+# Dipendenze del monitoraggio. Versioni pinnate: paho-mqtt 2.x ha cambiato
+# l'API dei callback rispetto alla 1.x, un upgrade a major silenzioso rompe
+# aws_iot_publisher.py senza che l'errore sia evidente.
+#
+# adafruit-circuitpython-dht richende libgpiod2 a livello di sistema:
+#   sudo apt-get install -y libgpiod2
+
+adafruit-circuitpython-dht==4.0.12
+influxdb-client==1.50.0
+psutil==7.0.0
+python-dotenv==1.1.0
+paho-mqtt==2.1.0

@@ -6,4 +6,7 @@ influxdb_data/
 grafana_data/
 influxdb_config/
 
+# Chiavi e certificati del device AWS IoT.
+certs/
+
 .ipynb_checkpoints/

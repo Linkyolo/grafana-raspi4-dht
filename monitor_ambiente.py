@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 
+from aws_iot_publisher import TelemetriaAWS
+
 load_dotenv()
 
 INFLUX_URL = os.getenv("INFLUX_URL", "http://localhost:8086")
@@ -19,6 +21,15 @@ INTERVALLO_DHT = 30
 INTERVALLO_SISTEMA = 10
 HOST_TAG = "raspberry_pi_4"
 
+# Frequenza di pubblicazione su AWS IoT Core, indipendente dalle frequenze
+# locali: la telemetria cloud non rilegge il DHT11, riusa gli ultimi valori.
+INTERVALLO_CLOUD = int(os.getenv("INTERVALLO_CLOUD", "60"))
+
+# Cache dell'ultima lettura valida per dominio. Con INTERVALLO_CLOUD=60 e
+# INTERVALLO_DHT=30 la cache viene letta senza mai rincorrere il sensore.
+_ultimo_ambiente = {}
+_ultimo_sistema = {}
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
@@ -28,6 +39,8 @@ sensor = adafruit_dht.DHT11(board.D12)
 
 client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
 write_api = client.write_api(write_options=SYNCHRONOUS)
+
+aws = TelemetriaAWS()
 
 
 def calcola_percepita(T, H):
@@ -70,6 +83,11 @@ def leggi_e_invia_ambiente():
                 .field("percepita", float(percepita))
             )
             write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
+            _ultimo_ambiente.update(
+                temperatura=float(temp),
+                umidita=float(hum),
+                percepita=float(percepita),
+            )
             log.info(f"Ambiente -> T:{temp}°C U:{hum}% P:{percepita}°C")
     except RuntimeError as e:
         log.warning(f"Lettura DHT fallita (normale, si riprova): {e}")
@@ -90,15 +108,65 @@ def leggi_e_invia_sistema():
             .field("cpu_temp", cpu_temp)
         )
         write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
+        _ultimo_sistema.update(
+            cpu_load=float(cpu_usage),
+            ram_load=float(ram_usage),
+            cpu_temp=float(cpu_temp),
+        )
         log.info(f"Sistema -> CPU:{cpu_usage}% Temp:{cpu_temp}°C RAM:{ram_usage}%")
     except Exception as e:
         log.error(f"Errore imprevisto lettura sistema: {e}")
 
 
+def costruisci_payload():
+    """Assembla il payload AWS IoT dalle cache. None se i dati non bastano."""
+    if not _ultimo_ambiente or not _ultimo_sistema:
+        return None
+    return {
+        "ts": int(time.time()),
+        "host": HOST_TAG,
+        **_ultimo_ambiente,
+        **_ultimo_sistema,
+    }
+
+
+def pubblica_cloud(forzato=False):
+    """Pubblica la telemetria su AWS IoT Core. Non solleva mai eccezioni.
+
+    Va senza eccezioni di proposito: il ramo cloud non deve poter fermare la
+    scrittura su InfluxDB. Un fallimento AWS degrada il monitoraggio cloud,
+    non quello locale.
+    """
+    if not aws.enabled:
+        return False
+    payload = costruisci_payload()
+    if payload is None:
+        if forzato:
+            log.warning("Lettura on-demand scartata: nessuna misura valida in cache.")
+        return False
+    try:
+        if aws.pubblica_telemetria(payload):
+            aws.pubblica_ultima_lettura(payload)
+            log.info(
+                "Cloud -> T:%s°C U:%s%% CPU:%s%% RAM:%s%%%s",
+                payload["temperatura"],
+                payload["umidita"],
+                payload["cpu_load"],
+                payload["ram_load"],
+                " (on-demand)" if forzato else "",
+            )
+            return True
+    except Exception as e:
+        log.error(f"Pubblicazione su AWS IoT non riuscita: {e}")
+    return False
+
+
 def main():
     log.info("Avvio monitoraggio ambiente + sistema...")
+    aws.connetti()
     ultimo_dht = 0
     ultimo_sistema = 0
+    ultimo_cloud = 0
 
     while True:
         ora = time.time()
@@ -111,6 +179,21 @@ def main():
             leggi_e_invia_sistema()
             ultimo_sistema = ora
 
+        # Comando on-demand ricevuto via MQTT: il callback di rete ha solo
+        # acceso il flag, la lettura avviene qui per non toccare il DHT11
+        # da un thread concorrente.
+        if aws.richiesta_lettura.is_set():
+            aws.richiesta_lettura.clear()
+            leggi_e_invia_ambiente()
+            leggi_e_invia_sistema()
+            ultimo_dht = ultimo_sistema = time.time()
+            if pubblica_cloud(forzato=True):
+                ultimo_cloud = time.time()
+
+        elif ora - ultimo_cloud >= INTERVALLO_CLOUD:
+            if pubblica_cloud():
+                ultimo_cloud = ora
+
         time.sleep(1)
 
 
@@ -120,4 +203,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         log.info("Script fermato manualmente.")
     finally:
+        aws.chiudi()
         client.close()
